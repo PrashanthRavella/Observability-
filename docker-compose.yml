@@ -1,0 +1,121 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: observability-clickhouse
+    restart: on-failure
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-admin}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-admin_password}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - DB_VIEWER_USER=${DB_VIEWER_USER:-optic_read_only}
+      - DB_VIEWER_PASS=${DB_VIEWER_PASS:-secure_read_123}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse/
+      - ./clickhouse/init.sh:/docker-entrypoint-initdb.d/init.sh
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - obs_net
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: observability-chromadb
+    restart: on-failure
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks:
+      - obs_net
+
+  backend:
+    image: node:20-alpine
+    container_name: observability-backend
+    restart: on-failure
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    environment:
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CHROMA_URL=http://chromadb:8000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - PORT=8080
+    command: /bin/sh -c "npm install && rm -rf dist && npm run build && npm start"
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    networks:
+      - obs_net
+
+  frontend:
+    image: node:20-alpine
+    container_name: observability-frontend
+    restart: on-failure
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - CI=true
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    command: /bin/sh -c "rm -rf node_modules/.vite && npm install && npm run dev -- --host 0.0.0.0 --force"
+    ports:
+      - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - obs_net
+
+  generator:
+    image: python:3.11-slim
+    container_name: observability-generator
+    restart: on-failure
+    working_dir: /app
+    volumes:
+      - ./telemetry:/app
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-admin}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-admin_password}
+    command: /bin/sh -c "pip install -r requirements.txt && python -u generator.py"
+    depends_on:
+      - clickhouse
+    networks:
+      - obs_net
+
+networks:
+  obs_net:
+    driver: bridge
+
+volumes:
+  clickhouse_data:
+  chroma_data:

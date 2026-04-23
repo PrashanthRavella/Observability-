@@ -1,0 +1,10 @@
+node_modules/
+.git/
+venv/
+__pycache__/
+dist/
+.env
+clickhouse_data/
+chroma_data/
+*.log
+.DS_Store
